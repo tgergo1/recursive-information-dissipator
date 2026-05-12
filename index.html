@@ -491,8 +491,23 @@ function gauss() {
   while (v === 0) v = Math.random();
   return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
 }
-function clampi(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
-function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+// NaN-safe clamps: NaN collapses to lo. The unsafe version let NaN
+// propagate from any arithmetic, ultimately reaching createRadialGradient
+// in renderOrgs and throwing every frame.
+function clampi(v, lo, hi) {
+  if (v !== v) return lo;
+  return v < lo ? lo : (v > hi ? hi : v);
+}
+function clamp(v, lo, hi) {
+  if (v !== v) return lo;
+  return v < lo ? lo : (v > hi ? hi : v);
+}
+let nanWarned = false;
+function warnNaN(where) {
+  if (nanWarned) return;
+  nanWarned = true;
+  console.warn('[RID] non-finite value detected in', where, '— sanitizing. Subsequent occurrences silenced.');
+}
 
 /* -------- WORLD -------- */
 function makeWorld() {
@@ -642,7 +657,9 @@ function updateMemory(o, feats) {
     let s = 0;
     const row = (NUM_ACTIONS + i) * FEAT_DIM;
     for (let j = 0; j < FEAT_DIM; j++) s += o.G[row + j] * feats[j];
-    newM[i] = (1 - beta) * o.M[i] + beta * Math.tanh(s);
+    let v = (1 - beta) * o.M[i] + beta * Math.tanh(s);
+    if (v !== v) { v = 0; warnNaN('memory update'); }
+    newM[i] = v;
   }
   o.M = newM;
 }
@@ -688,12 +705,18 @@ function stepSim() {
     o.O -= params.lambda * o.O + params.hazardDmg * Hloc;
     o.E -= params.baseCost;
 
-    if (o.O <= 0 || o.E <= 0) {
-      const i = idxXY(o.x, o.y);
+    // Death: O or E exhausted, OR state became non-finite. NaN <= 0 is
+    // false, so a corrupted organism would otherwise survive forever
+    // and re-poison the world with NaN.
+    if (o.O <= 0 || o.E <= 0 ||
+        o.O !== o.O || o.E !== o.E ||
+        o.x !== o.x || o.y !== o.y) {
+      if (o.O !== o.O || o.E !== o.E) warnNaN('org state (E/O)');
+      const i = idxXY(o.x !== o.x ? 0 : o.x, o.y !== o.y ? 0 : o.y);
       Hf[i] = clamp(Hf[i] + 0.12, 0, 1);
       R[i] = clamp(R[i] + 0.04, 0, 1);
       deaths++;
-      spawnDeathFx(o);
+      spawnDeathFx({ x: o.x !== o.x ? 0 : o.x, y: o.y !== o.y ? 0 : o.y, hue: o.hue });
       if (o.id === selectedId) selectedId = null;
       continue;
     }
@@ -709,10 +732,13 @@ function stepSim() {
       case ACT.MW: o.x -= 1; o.E -= params.moveCost; break;
       case ACT.HARVEST: {
         const i = idxXY(o.x, o.y);
-        const amt = Math.min(params.harvestRate, R[i]);
+        // R[i] is undefined for out-of-range indices (would yield NaN
+        // through Math.min); treat as 0 just in case.
+        const ri = Number.isFinite(R[i]) ? R[i] : 0;
+        const amt = Math.min(params.harvestRate, ri);
         o.E += params.eta * amt;
-        R[i] = clamp(R[i] - amt, 0, 1);
-        Hf[i] = clamp(Hf[i] + amt * params.wasteCoef * (1 - params.eta), 0, 1);
+        R[i] = clamp(ri - amt, 0, 1);
+        Hf[i] = clamp((Number.isFinite(Hf[i]) ? Hf[i] : 0) + amt * params.wasteCoef * (1 - params.eta), 0, 1);
         if (amt > 0.05) spawnHarvestFx(o);
         break;
       }
@@ -895,14 +921,23 @@ function renderFx() {
 }
 
 function renderOrgs() {
-  // dim first → bright on top
-  const sorted = orgs.slice().sort((a, b) => a.O - b.O);
+  // dim first → bright on top. Sort comparator falls back to 0 for NaN
+  // so a corrupted org doesn't poison the whole sort.
+  const sorted = orgs.slice().sort((a, b) => {
+    const d = a.O - b.O;
+    return d !== d ? 0 : d;
+  });
   ctx.save();
   for (const o of sorted) {
     const px = o.x * CELL + CELL/2;
     const py = o.y * CELL + CELL/2;
     const size = clamp(1.7 + Math.sqrt(Math.max(0, o.E)) * 1.0, 1.7, 6.5);
     const opacityO = clamp(0.25 + 0.75 * o.O, 0.15, 1);
+    // Final defense: skip if any coordinate or radius is non-finite.
+    // The death check should already have removed these, but rendering
+    // must never call createRadialGradient with NaN.
+    if (!Number.isFinite(px) || !Number.isFinite(py) ||
+        !Number.isFinite(size) || size <= 0) continue;
 
     // action halo
     if (o.action >= 4 && o.action !== ACT.REST) {
