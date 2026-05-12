@@ -123,6 +123,23 @@
   }
   .hover-info b { color: var(--accent); font-weight: 500; }
   .hover-info .org-line { color: var(--magenta); margin-top: 4px; padding-top: 4px; border-top: 1px solid var(--border); }
+  .err-banner {
+    position: absolute;
+    top: 24px; right: 24px;
+    max-width: 60%;
+    padding: 8px 12px;
+    background: rgba(255, 107, 107, 0.16);
+    border: 1px solid rgba(255, 107, 107, 0.5);
+    color: #ffb3b3;
+    font-family: var(--mono);
+    font-size: 11px;
+    border-radius: 4px;
+    display: none;
+    z-index: 30;
+    line-height: 1.4;
+    box-shadow: 0 6px 24px rgba(0,0,0,0.4);
+  }
+  .err-banner b { color: var(--red); }
 
   aside {
     background: var(--panel);
@@ -326,6 +343,7 @@
         <span><i style="background:#ff7eb6;opacity:0.5"></i>reproduce</span>
       </div>
       <div class="hover-info" id="hoverInfo"></div>
+      <div class="err-banner" id="errBanner"></div>
     </div>
 
     <aside>
@@ -938,10 +956,11 @@ function renderOrgs() {
 function renderChart() {
   if (!chartCtx) return;
   const w = chartCanvas.width, h = chartCanvas.height;
+  const dpr = window.devicePixelRatio || 1;
   chartCtx.fillStyle = 'rgba(7,9,13,0.6)';
   chartCtx.fillRect(0, 0, w, h);
   chartCtx.strokeStyle = '#171f2a';
-  chartCtx.lineWidth = 1;
+  chartCtx.lineWidth = 1 * dpr;
   for (let i = 0; i <= 3; i++) {
     const y = (h - 1) * (i / 3);
     chartCtx.beginPath();
@@ -958,12 +977,12 @@ function renderChart() {
     for (let i = 0; i < history.length; i++) {
       const x = (i / (history.length - 1)) * w;
       const v = history[i][key] / max;
-      const y = h - clamp(v, 0, 1.02) * (h - 4) - 2;
+      const y = h - clamp(v, 0, 1.02) * (h - 4 * dpr) - 2 * dpr;
       if (i === 0) chartCtx.moveTo(x, y);
       else chartCtx.lineTo(x, y);
     }
     chartCtx.strokeStyle = color;
-    chartCtx.lineWidth = 1.5;
+    chartCtx.lineWidth = 1.5 * dpr;
     chartCtx.stroke();
   }
   function fill(key, color, max) {
@@ -972,7 +991,7 @@ function renderChart() {
     for (let i = 0; i < history.length; i++) {
       const x = (i / (history.length - 1)) * w;
       const v = history[i][key] / max;
-      const y = h - clamp(v, 0, 1.02) * (h - 4) - 2;
+      const y = h - clamp(v, 0, 1.02) * (h - 4 * dpr) - 2 * dpr;
       chartCtx.lineTo(x, y);
     }
     chartCtx.lineTo(w, h);
@@ -987,8 +1006,42 @@ function renderChart() {
   line('pop', '#5dd2ff', maxPop);
 }
 
+/* -------- DOM CACHE -------- */
+const DOM = {};
+function $(id) { return DOM[id] || document.getElementById(id); }
+
+function cacheDOM() {
+  const ids = ['world','chart','tickReadout','fpsReadout',
+    'mPop','mGen','mO','mE','mAge','mR','mInt','mBD',
+    'actionBar','actionLegend','inspState','inspBody','hoverInfo',
+    'btnPlay','btnStep','btnReset','btnSeed','speed','speedVal',
+    'params','errBanner'];
+  const missing = [];
+  for (const id of ids) {
+    const el = document.getElementById(id);
+    if (!el) missing.push(id);
+    DOM[id] = el;
+  }
+  if (missing.length) console.warn('[RID] missing DOM elements:', missing);
+  return missing.length === 0;
+}
+
 /* -------- HUD -------- */
-function $(id) { return document.getElementById(id); }
+// Pre-build action-bar segments once; just resize widths per tick.
+let actionBarSegs = null;
+function ensureActionBar() {
+  if (actionBarSegs) return;
+  actionBarSegs = [];
+  DOM.actionBar.innerHTML = '';
+  for (let a = 0; a < NUM_ACTIONS; a++) {
+    const seg = document.createElement('div');
+    seg.className = 'seg';
+    seg.style.background = ACTION_COLORS[a];
+    seg.title = ACTION_LABELS[a];
+    DOM.actionBar.appendChild(seg);
+    actionBarSegs.push(seg);
+  }
+}
 
 function updateHUD(now) {
   let mO = 0, mE = 0, mA = 0, totR = 0;
@@ -996,44 +1049,40 @@ function updateHUD(now) {
   if (orgs.length) { mO /= orgs.length; mE /= orgs.length; mA /= orgs.length; }
   for (let i = 0; i < W*H; i++) totR += world.R[i];
 
-  $('mPop').textContent = orgs.length;
-  $('mGen').textContent = maxGen;
-  $('mO').innerHTML = mO.toFixed(3);
-  $('mE').innerHTML = mE.toFixed(2);
-  $('mAge').innerHTML = mA.toFixed(0) + '<span class="unit">ticks</span>';
-  $('mR').innerHTML = (totR / (W*H)).toFixed(3);
-  $('mInt').innerHTML = totalOrgTime > 9999
+  DOM.mPop.textContent = orgs.length;
+  DOM.mGen.textContent = maxGen;
+  DOM.mO.textContent = mO.toFixed(3);
+  DOM.mE.textContent = mE.toFixed(2);
+  DOM.mAge.innerHTML = mA.toFixed(0) + '<span class="unit">ticks</span>';
+  DOM.mR.textContent = (totR / (W*H)).toFixed(3);
+  DOM.mInt.innerHTML = totalOrgTime > 9999
     ? (totalOrgTime / 1000).toFixed(1) + '<span class="unit">k</span>'
     : totalOrgTime.toFixed(0);
-  $('mBD').innerHTML = `${births} / ${deaths}`;
-  $('tickReadout').textContent = `t = ${tick}`;
+  DOM.mBD.textContent = `${births} / ${deaths}`;
+  DOM.tickReadout.textContent = `t = ${tick}`;
 
   if (now - fpsLastUpdate > 500) {
     const dt = (now - fpsLastUpdate) / 1000;
     lastReportedTps = fpsTickCount / Math.max(0.001, dt);
     fpsTickCount = 0;
     fpsLastUpdate = now;
-    $('fpsReadout').textContent = `${lastReportedTps.toFixed(0)} ticks/s`;
+    DOM.fpsReadout.textContent = `${lastReportedTps.toFixed(0)} ticks/s`;
   }
 
-  // Action bar
+  // Action bar — resize cached segments instead of rebuilding.
+  ensureActionBar();
   const counts = new Array(NUM_ACTIONS).fill(0);
   for (const o of orgs) if (o.action >= 0) counts[o.action]++;
   const total = counts.reduce((a,b)=>a+b, 0) || 1;
-  const bar = $('actionBar');
-  bar.innerHTML = '';
   for (let a = 0; a < NUM_ACTIONS; a++) {
-    const seg = document.createElement('div');
-    seg.className = 'seg';
-    seg.style.width = (counts[a] / total * 100).toFixed(2) + '%';
-    seg.style.background = ACTION_COLORS[a];
-    seg.title = ACTION_LABELS[a] + ': ' + counts[a];
-    bar.appendChild(seg);
+    const pct = (counts[a] / total * 100).toFixed(2);
+    actionBarSegs[a].style.width = pct + '%';
+    actionBarSegs[a].title = `${ACTION_LABELS[a]}: ${counts[a]}`;
   }
 }
 
 function buildActionLegend() {
-  const leg = $('actionLegend');
+  const leg = DOM.actionLegend;
   leg.innerHTML = '';
   for (let a = 0; a < NUM_ACTIONS; a++) {
     const sp = document.createElement('span');
@@ -1042,45 +1091,59 @@ function buildActionLegend() {
   }
 }
 
-/* -------- INSPECTOR -------- */
-function updateInspector() {
-  const body = $('inspBody');
-  const pill = $('inspState');
-  const o = selectedId ? orgs.find(x => x.id === selectedId) : null;
-  if (!o) {
-    body.innerHTML = '<div class="none">Click an organism to inspect its state and genome.</div>';
-    pill.style.display = 'none';
-    return;
-  }
+/* -------- INSPECTOR --------
+   Updates in place; only rebuilds DOM when the selection changes,
+   so the genome canvas isn't torn down every frame. */
+const inspectorState = { id: null, nodes: null };
+
+function clearInspector() {
+  if (inspectorState.id === null) return;
+  DOM.inspBody.innerHTML = '<div class="none">Click an organism to inspect its state and genome.</div>';
+  DOM.inspState.style.display = 'none';
+  inspectorState.id = null;
+  inspectorState.nodes = null;
+}
+
+function buildInspectorDom(o) {
+  const pill = DOM.inspState;
   pill.style.display = 'inline-block';
   pill.textContent = `#${o.id}`;
   pill.style.background = `hsla(${o.hue}, 70%, 50%, 0.18)`;
   pill.style.color = `hsl(${o.hue}, 70%, 70%)`;
   pill.style.borderColor = `hsla(${o.hue}, 70%, 50%, 0.35)`;
 
-  const rows = [
-    ['lineage',     `${o.lineage} · gen ${o.generation}`],
-    ['parent',      o.parent ? `#${o.parent}` : '— (founder)'],
-    ['age',         `${o.age} ticks`],
-    ['position',    `${o.x.toFixed(1)}, ${o.y.toFixed(1)}`],
-    ['E (energy)',  o.E.toFixed(2)],
-    ['O (integrity)', o.O.toFixed(3)],
-    ['M (memory)',  Array.from(o.M).map(v => v.toFixed(2)).join('  ')],
-    ['last action', o.action >= 0 ? ACTION_LABELS[o.action] : '—'],
-  ];
-  let html = '';
-  for (const [k, v] of rows) {
-    html += `<div class="inspector-row"><span class="k">${k}</span><span class="v">${v}</span></div>`;
-  }
-  html += `<div class="genome">
-    <canvas id="gCanvas"></canvas>
-    <div class="caption"><span>rows: 9 actions + 4 mem-update</span><span>cols: ${FEAT_DIM} features</span></div>
-  </div>`;
-  body.innerHTML = html;
+  DOM.inspBody.innerHTML = `
+    <div class="inspector-row"><span class="k">lineage</span><span class="v">${o.lineage} · gen ${o.generation}</span></div>
+    <div class="inspector-row"><span class="k">parent</span><span class="v">${o.parent ? '#' + o.parent : '— (founder)'}</span></div>
+    <div class="inspector-row"><span class="k">age</span><span class="v" data-k="age"></span></div>
+    <div class="inspector-row"><span class="k">position</span><span class="v" data-k="pos"></span></div>
+    <div class="inspector-row"><span class="k">E (energy)</span><span class="v" data-k="E"></span></div>
+    <div class="inspector-row"><span class="k">O (integrity)</span><span class="v" data-k="O"></span></div>
+    <div class="inspector-row"><span class="k">M (memory)</span><span class="v" data-k="M"></span></div>
+    <div class="inspector-row"><span class="k">last action</span><span class="v" data-k="action"></span></div>
+    <div class="genome">
+      <canvas id="gCanvas"></canvas>
+      <div class="caption"><span>rows: 9 actions + 4 mem-update</span><span>cols: ${FEAT_DIM} features</span></div>
+    </div>
+  `;
+  inspectorState.id = o.id;
+  inspectorState.nodes = {
+    age:    DOM.inspBody.querySelector('[data-k="age"]'),
+    pos:    DOM.inspBody.querySelector('[data-k="pos"]'),
+    E:      DOM.inspBody.querySelector('[data-k="E"]'),
+    O:      DOM.inspBody.querySelector('[data-k="O"]'),
+    M:      DOM.inspBody.querySelector('[data-k="M"]'),
+    action: DOM.inspBody.querySelector('[data-k="action"]'),
+  };
+  drawGenomeHeatmap(o);
+}
 
+function drawGenomeHeatmap(o) {
   const gc = document.getElementById('gCanvas');
+  if (!gc) return;
   const dpr = window.devicePixelRatio || 1;
-  gc.width = Math.floor(gc.getBoundingClientRect().width * dpr);
+  const w = Math.max(40, gc.getBoundingClientRect().width);
+  gc.width = Math.floor(w * dpr);
   gc.height = Math.floor(70 * dpr);
   const gctx = gc.getContext('2d');
   const img = gctx.createImageData(FEAT_DIM, GENOME_ROWS);
@@ -1109,6 +1172,20 @@ function updateInspector() {
   gctx.imageSmoothingEnabled = false;
   gctx.clearRect(0, 0, gc.width, gc.height);
   gctx.drawImage(off, 0, 0, gc.width, gc.height);
+}
+
+function updateInspector() {
+  const o = selectedId ? orgs.find(x => x.id === selectedId) : null;
+  if (!o) { clearInspector(); return; }
+  if (inspectorState.id !== o.id) buildInspectorDom(o);
+  const n = inspectorState.nodes;
+  if (!n) return;
+  n.age.textContent = `${o.age} ticks`;
+  n.pos.textContent = `${o.x.toFixed(1)}, ${o.y.toFixed(1)}`;
+  n.E.textContent   = o.E.toFixed(2);
+  n.O.textContent   = o.O.toFixed(3);
+  n.M.textContent   = Array.from(o.M).map(v => v.toFixed(2)).join('  ');
+  n.action.textContent = o.action >= 0 ? ACTION_LABELS[o.action] : '—';
 }
 
 /* -------- UI WIRING -------- */
@@ -1208,26 +1285,54 @@ function render() {
   renderChart();
 }
 
+let loopErrors = 0;
+function showLoopError(err) {
+  loopErrors++;
+  console.error('[RID loop error]', err);
+  if (!DOM.errBanner) return;
+  DOM.errBanner.style.display = 'block';
+  const msg = err && err.message ? err.message : String(err);
+  DOM.errBanner.innerHTML = `<b>Simulation error</b> (#${loopErrors}): ${msg}<br><span style="opacity:0.7;font-size:10px;">See browser console for the full stack. The loop keeps trying.</span>`;
+}
+
 function loop(now) {
-  if (playing) {
-    for (let i = 0; i < stepsPerFrame; i++) stepSim();
-    if (orgs.length === 0) {
-      for (let i = 0; i < 15; i++) orgs.push(newOrganism(Math.random()*W, Math.random()*H, null));
+  try {
+    if (playing) {
+      for (let i = 0; i < stepsPerFrame; i++) stepSim();
+      if (orgs.length === 0) {
+        for (let i = 0; i < 15; i++) orgs.push(newOrganism(Math.random()*W, Math.random()*H, null));
+      }
     }
+    render();
+    updateHUD(now || performance.now());
+    updateInspector();
+  } catch (err) {
+    showLoopError(err);
   }
-  render();
-  updateHUD(now || performance.now());
-  updateInspector();
   requestAnimationFrame(loop);
 }
 
 /* -------- BOOT -------- */
-initSim();
-initRender();
-setupUI();
-buildActionLegend();
-fpsLastUpdate = performance.now();
-requestAnimationFrame(loop);
+(function boot() {
+  try {
+    if (!cacheDOM()) {
+      // Missing elements are non-fatal — try anyway, but report visibly.
+    }
+    initSim();
+    initRender();
+    setupUI();
+    buildActionLegend();
+    fpsLastUpdate = performance.now();
+    requestAnimationFrame(loop);
+  } catch (err) {
+    console.error('[RID boot error]', err);
+    const b = document.getElementById('errBanner');
+    if (b) {
+      b.style.display = 'block';
+      b.innerHTML = `<b>Boot error</b>: ${err && err.message ? err.message : err}`;
+    }
+  }
+})();
 </script>
 </body>
 </html>
