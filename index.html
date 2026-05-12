@@ -551,24 +551,30 @@ const GENOME_SIZE = GENOME_ROWS * FEAT_DIM;
 // indices into feature vector
 const FI = { R:0, dRx:1, dRy:2, H:3, dHx:4, dHy:5, S:6, N:7, E:8, O:9, M0:10, M1:11, M2:12, M3:13, BIAS:14 };
 
+// Defaults retuned for sustained lineages at boot. Earlier values were
+// too tight: E_init=3 with baseCost=0.05 gave ~60 ticks before starvation,
+// and E_rep=7.5 needed +4.5 E from a perfect policy in that window. Any
+// noise in the initial action selection led to mass extinction before
+// the first reproduction. New defaults give organisms a survivable
+// budget while keeping the physics interesting.
 const params = {
-  regen:        0.0024,
+  regen:        0.0035,
   hDecay:       0.012,
-  hNoise:       0.0022,
-  lambda:       0.0035,
-  hazardDmg:    0.05,
-  baseCost:     0.05,
-  moveCost:     0.06,
-  repairCost:   0.55,
-  repairAlpha:  0.40,
+  hNoise:       0.0018,
+  lambda:       0.0025,
+  hazardDmg:    0.040,
+  baseCost:     0.035,
+  moveCost:     0.050,
+  repairCost:   0.50,
+  repairAlpha:  0.45,
   harvestRate:  0.32,
-  eta:          0.62,
+  eta:          0.65,
   wasteCoef:    0.85,
-  E_rep:        7.5,
-  O_rep:        0.55,
-  E_birth:      4.0,
-  O_birth:      0.18,
-  E_init:       3.0,
+  E_rep:        5.5,
+  O_rep:        0.45,
+  E_birth:      3.0,
+  O_birth:      0.10,
+  E_init:       4.0,
   O_init:       0.85,
   mutation:     0.06,
   initPop:      80,
@@ -591,16 +597,16 @@ const PARAM_DEFS = [
 // Search bounds — biased toward survivable regimes so most trials don't
 // instantly extinct. Sliders in PARAM_DEFS allow wider exploration manually.
 const SEARCH_RANGES = [
-  ['lambda',      0.0005, 0.0060],
-  ['eta',         0.40,   0.85],
-  ['regen',       0.0015, 0.0070],
-  ['hazardDmg',   0.005,  0.10],
-  ['hNoise',      0.0,    0.0040],
-  ['repairAlpha', 0.25,   0.80],
-  ['harvestRate', 0.20,   0.55],
-  ['E_rep',       4.0,    12.0],
-  ['O_rep',       0.30,   0.75],
-  ['mutation',    0.02,   0.12],
+  ['lambda',      0.0005, 0.0040],
+  ['eta',         0.50,   0.85],
+  ['regen',       0.0025, 0.0080],
+  ['hazardDmg',   0.005,  0.060],
+  ['hNoise',      0.0,    0.0030],
+  ['repairAlpha', 0.30,   0.80],
+  ['harvestRate', 0.22,   0.55],
+  ['E_rep',       3.5,    8.0],
+  ['O_rep',       0.30,   0.60],
+  ['mutation',    0.03,   0.10],
 ];
 
 const searchState = {
@@ -672,29 +678,53 @@ function makeWorld() {
 /* -------- GENOME -------- */
 function newGenome() {
   const g = new Float32Array(GENOME_SIZE);
-  for (let i = 0; i < g.length; i++) g[i] = (Math.random() - 0.5) * 0.6;
-  // Sensible action priors so initial pop isn't pure noise; evolution refines.
-  g[ACT.MN * FEAT_DIM + FI.dRy] = -1.6;
-  g[ACT.MS * FEAT_DIM + FI.dRy] =  1.6;
-  g[ACT.ME * FEAT_DIM + FI.dRx] =  1.6;
-  g[ACT.MW * FEAT_DIM + FI.dRx] = -1.6;
-  // avoid hazards
-  g[ACT.MN * FEAT_DIM + FI.dHy] =  1.0;
-  g[ACT.MS * FEAT_DIM + FI.dHy] = -1.0;
-  g[ACT.ME * FEAT_DIM + FI.dHx] = -1.0;
-  g[ACT.MW * FEAT_DIM + FI.dHx] =  1.0;
-  // harvest if R is high here
-  g[ACT.HARVEST * FEAT_DIM + FI.R] =  2.2;
-  g[ACT.HARVEST * FEAT_DIM + FI.H] = -1.5;
-  // repair if O is low (and we have energy)
-  g[ACT.REPAIR * FEAT_DIM + FI.O] = -2.4;
-  g[ACT.REPAIR * FEAT_DIM + FI.E] =  0.9;
-  // reproduce when both E and O high
-  g[ACT.REPRO  * FEAT_DIM + FI.E] =  1.4;
-  g[ACT.REPRO  * FEAT_DIM + FI.O] =  1.4;
-  g[ACT.REPRO  * FEAT_DIM + FI.BIAS] = -0.8;
-  // rest preference if E low
-  g[ACT.REST   * FEAT_DIM + FI.E] = -1.1;
+  // Smaller initial noise so explicit priors aren't washed out by ±0.3
+  // contributions summed over 15 features.
+  for (let i = 0; i < g.length; i++) g[i] = (Math.random() - 0.5) * 0.25;
+
+  // Movement: follow the resource gradient, BUT strongly suppressed when
+  // the current cell already has resource. Previously the gradient term
+  // (×4 in perception) routinely beat the harvest score at moderate R,
+  // so organisms wandered themselves to death.
+  const mvGrad = 0.75;
+  g[ACT.MN * FEAT_DIM + FI.dRy] = -mvGrad;
+  g[ACT.MS * FEAT_DIM + FI.dRy] =  mvGrad;
+  g[ACT.ME * FEAT_DIM + FI.dRx] =  mvGrad;
+  g[ACT.MW * FEAT_DIM + FI.dRx] = -mvGrad;
+  for (const a of [ACT.MN, ACT.MS, ACT.ME, ACT.MW]) {
+    g[a * FEAT_DIM + FI.R]    = -1.2;  // stay put when R is here
+    g[a * FEAT_DIM + FI.BIAS] = -0.5;  // baseline cost-aware
+  }
+  // Avoid hazards
+  g[ACT.MN * FEAT_DIM + FI.dHy] =  0.5;
+  g[ACT.MS * FEAT_DIM + FI.dHy] = -0.5;
+  g[ACT.ME * FEAT_DIM + FI.dHx] = -0.5;
+  g[ACT.MW * FEAT_DIM + FI.dHx] =  0.5;
+
+  // HARVEST: dominant when local R is non-trivial. Mild negative E so it
+  // eases off slightly once an organism is full.
+  g[ACT.HARVEST * FEAT_DIM + FI.R]    =  4.0;
+  g[ACT.HARVEST * FEAT_DIM + FI.H]    = -1.0;
+  g[ACT.HARVEST * FEAT_DIM + FI.E]    = -0.2;
+
+  // REPAIR: only when O drops well below 0.5 AND energy is available.
+  g[ACT.REPAIR * FEAT_DIM + FI.O]    = -3.5;
+  g[ACT.REPAIR * FEAT_DIM + FI.E]    =  0.8;
+  g[ACT.REPAIR * FEAT_DIM + FI.BIAS] =  1.6;
+
+  // REPRO: scales with both E and O. Bias tuned so HARVEST wins until
+  // E is comfortably above E_rep≈5.5; then REPRO takes over and fires.
+  g[ACT.REPRO * FEAT_DIM + FI.E]    =  2.5;
+  g[ACT.REPRO * FEAT_DIM + FI.O]    =  2.0;
+  g[ACT.REPRO * FEAT_DIM + FI.BIAS] = -1.8;
+
+  // REST: last-resort fallback when E is very low.
+  g[ACT.REST * FEAT_DIM + FI.E]    = -1.4;
+  g[ACT.REST * FEAT_DIM + FI.BIAS] = -1.2;
+
+  // SIGNAL: rare by default; evolution may discover use cases.
+  g[ACT.SIGNAL * FEAT_DIM + FI.BIAS] = -1.6;
+
   return g;
 }
 
@@ -1581,9 +1611,14 @@ async function runSearch() {
     let lastTick  = 0;
     for (let t = 0; t < nTicks; t += chunkSize) {
       const end = Math.min(t + chunkSize, nTicks);
-      for (let tt = t; tt < end; tt++) stepSim();
+      for (let tt = t; tt < end; tt++) {
+        stepSim();
+        // Track the exact tick when the last organism died, not the
+        // chunk boundary — previously every extinct trial reported the
+        // same time (250, 500, ...) which masked real fitness gradients.
+        if (orgs.length === 0 && extinctAt < 0) extinctAt = tt + 1;
+      }
       lastTick = end;
-      if (orgs.length === 0 && extinctAt < 0) extinctAt = end;
       updateSearchProgress(trial, nTrials, end, nTicks, extinctAt);
       await new Promise(r => setTimeout(r, 0));
       if (searchState.abort) break;
