@@ -315,6 +315,99 @@
     font-size: 10px;
     border: 1px solid rgba(93,210,255,0.2);
   }
+  .pill.running {
+    background: rgba(255,209,102,0.15);
+    color: var(--amber);
+    border-color: rgba(255,209,102,0.3);
+    animation: pulse 1.4s infinite ease-in-out;
+  }
+  .progress-bar {
+    width: 100%;
+    height: 5px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    overflow: hidden;
+    margin-top: 8px;
+  }
+  .progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--accent), var(--green));
+    width: 0%;
+    transition: width 0.12s ease-out;
+  }
+  .progress-text {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--dim);
+    margin-top: 6px;
+    line-height: 1.4;
+  }
+  .progress-text b { color: var(--text); font-weight: 500; }
+  .search-row {
+    display: grid;
+    grid-template-columns: 24px 56px 1fr;
+    gap: 8px;
+    align-items: center;
+    padding: 5px 8px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    margin-bottom: 4px;
+    font-family: var(--mono);
+    font-size: 10px;
+    cursor: pointer;
+    transition: background 0.1s, border-color 0.1s;
+  }
+  .search-row:hover { background: var(--panel-3); border-color: #2a3548; }
+  .search-row.best {
+    border-color: rgba(93,210,255,0.45);
+    background: rgba(93,210,255,0.06);
+  }
+  .search-row .rank { color: var(--faint); }
+  .search-row .score { color: var(--accent); font-weight: 600; font-size: 11px; }
+  .search-row .summary { color: var(--dim); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .search-row .summary b { color: var(--text); }
+  .search-row .summary b.bad { color: var(--red); }
+  .search-config { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+  .search-config .field {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 11px; color: var(--dim);
+    font-family: var(--mono);
+  }
+  .search-config input[type="number"] {
+    width: 56px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 3px 5px;
+    border-radius: 3px;
+    font-family: var(--mono);
+    font-size: 11px;
+  }
+  body.searching .stage > #world { opacity: 0.25; transition: opacity 0.2s; }
+  body.searching .stage::after {
+    content: 'Bruteforce in progress — rendering paused';
+    position: absolute;
+    top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    color: var(--accent);
+    font-family: var(--mono);
+    font-size: 13px;
+    background: rgba(13,18,24,0.85);
+    padding: 10px 18px;
+    border-radius: 6px;
+    border: 1px solid rgba(93,210,255,0.3);
+    z-index: 20;
+    pointer-events: none;
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+    letter-spacing: 0.04em;
+  }
+  button:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
   @media (max-width: 1100px) {
     main { grid-template-columns: 1fr 340px; }
   }
@@ -398,6 +491,28 @@
         <h2>Parameters</h2>
         <div id="params"></div>
       </section>
+
+      <section>
+        <h2>Bruteforce search <span id="srState" class="pill running" style="display:none;">running</span></h2>
+        <div class="controls">
+          <button id="btnSearch" class="primary">▶ Search</button>
+          <button id="btnSearchStop" disabled>■ Stop</button>
+          <button id="btnSearchApplyBest" disabled>Apply best</button>
+          <button id="btnSearchRestore" disabled>Restore</button>
+        </div>
+        <div class="search-config">
+          <span class="field">trials <input id="srTrials" type="number" min="10" max="500" step="10" value="80"></span>
+          <span class="field">ticks <input id="srTicks" type="number" min="300" max="6000" step="100" value="1500"></span>
+        </div>
+        <div id="searchProgress" style="display:none;">
+          <div class="progress-bar"><div class="progress-fill" id="srBar"></div></div>
+          <div class="progress-text" id="srText">—</div>
+        </div>
+        <div id="searchTop" style="margin-top:10px;"></div>
+        <div style="margin-top:6px; font-size:10px; color:var(--faint); line-height:1.4;">
+          Score = survival × (∫O dt / T + log₂(1+gen)·3 + pop bonus). Best result is auto-applied; click any row to switch.
+        </div>
+      </section>
     </aside>
   </main>
 
@@ -472,6 +587,29 @@ const PARAM_DEFS = [
   ['E_rep',       'E_rep',      2.0,   20.0,  0.5,    1],
   ['O_rep',       'O_rep',      0.10,  0.95,  0.01,   2],
 ];
+
+// Search bounds — biased toward survivable regimes so most trials don't
+// instantly extinct. Sliders in PARAM_DEFS allow wider exploration manually.
+const SEARCH_RANGES = [
+  ['lambda',      0.0005, 0.0060],
+  ['eta',         0.40,   0.85],
+  ['regen',       0.0015, 0.0070],
+  ['hazardDmg',   0.005,  0.10],
+  ['hNoise',      0.0,    0.0040],
+  ['repairAlpha', 0.25,   0.80],
+  ['harvestRate', 0.20,   0.55],
+  ['E_rep',       4.0,    12.0],
+  ['O_rep',       0.30,   0.75],
+  ['mutation',    0.02,   0.12],
+];
+
+const searchState = {
+  running: false,
+  abort:   false,
+  results: [],
+  savedParams: null,
+  prevPlaying: false,
+};
 
 let world, orgs;
 let nextId, tick, totalOrgTime, births, deaths, maxGen;
@@ -1050,7 +1188,10 @@ function cacheDOM() {
     'mPop','mGen','mO','mE','mAge','mR','mInt','mBD',
     'actionBar','actionLegend','inspState','inspBody','hoverInfo',
     'btnPlay','btnStep','btnReset','btnSeed','speed','speedVal',
-    'params','errBanner'];
+    'params','errBanner',
+    'btnSearch','btnSearchStop','btnSearchApplyBest','btnSearchRestore',
+    'srTrials','srTicks','srBar','srText','srState',
+    'searchProgress','searchTop'];
   const missing = [];
   for (const id of ids) {
     const el = document.getElementById(id);
@@ -1243,6 +1384,12 @@ function setupUI() {
     $('speedVal').textContent = stepsPerFrame;
   });
 
+  // Search controls
+  DOM.btnSearch.addEventListener('click', runSearch);
+  DOM.btnSearchStop.addEventListener('click', stopSearch);
+  DOM.btnSearchApplyBest.addEventListener('click', applyBestResult);
+  DOM.btnSearchRestore.addEventListener('click', restoreSavedParams);
+
   const pBox = $('params');
   for (const [label, key, lo, hi, step, decimals] of PARAM_DEFS) {
     const row = document.createElement('div');
@@ -1312,6 +1459,194 @@ function setupUI() {
   });
 }
 
+/* -------- PARAMETER SEARCH -------- */
+function fitness(extinctAt, T, finalPop, gen, orgTime) {
+  // Survival fraction × (avg organisation density + small gen bonus + bounded pop bonus).
+  // Multiplicative on survival so anything that goes extinct early scores low,
+  // additive afterwards so we discriminate among survivors by depth and richness.
+  const survival = extinctAt < 0 ? 1 : (extinctAt / T);
+  const meanOrg  = orgTime / T;                          // ∫O dt averaged per tick
+  const genBonus = Math.log2(1 + Math.max(0, gen)) * 3;  // gen=63 → 18
+  // pop bonus peaks at ~80 organisms; both extinction-prone and saturated runs get less
+  const popBonus = finalPop === 0 ? 0
+                 : finalPop >= params.maxPop * 0.95 ? 4
+                 : Math.min(finalPop, 80) / 80 * 8;
+  return survival * (meanOrg + genBonus + popBonus);
+}
+
+function sortedResults() {
+  return searchState.results.slice().sort((a, b) => b.score - a.score);
+}
+
+function formatK(v) {
+  if (!Number.isFinite(v)) return '—';
+  return v >= 1000 ? (v / 1000).toFixed(1) + 'k' : v.toFixed(0);
+}
+
+function updateSearchProgress(trial, nTrials, t, nTicks, extinctAt) {
+  const totalTicks    = nTrials * nTicks;
+  const elapsedTicks  = trial * nTicks + t;
+  const pct           = (elapsedTicks / totalTicks) * 100;
+  if (DOM.srBar) DOM.srBar.style.width = pct.toFixed(1) + '%';
+  const best = searchState.results.length ? sortedResults()[0] : null;
+  const status = extinctAt >= 0
+    ? `extinct @ tick ${extinctAt}`
+    : `tick ${t}/${nTicks} · pop ${orgs.length}`;
+  if (DOM.srText) {
+    DOM.srText.innerHTML =
+      `trial <b>${trial + 1}/${nTrials}</b> · ${status}` +
+      (best ? ` · best <b>${best.score.toFixed(2)}</b>` : '');
+  }
+}
+
+function renderSearchResults() {
+  if (!DOM.searchTop) return;
+  const top = sortedResults().slice(0, 6);
+  if (top.length === 0) {
+    DOM.searchTop.innerHTML = '';
+    return;
+  }
+  let html = '';
+  for (let i = 0; i < top.length; i++) {
+    const r = top[i];
+    const status = r.extinctAt >= 0
+      ? `<b class="bad">extinct@${r.extinctAt}</b>`
+      : `<b>survived</b>`;
+    const cls = i === 0 ? 'search-row best' : 'search-row';
+    html +=
+      `<div class="${cls}" data-idx="${i}" title="Click to apply these parameters">` +
+        `<span class="rank">#${i + 1}</span>` +
+        `<span class="score">${r.score.toFixed(2)}</span>` +
+        `<span class="summary">${status} · gen <b>${r.maxGen}</b> · pop <b>${r.finalPop}</b> · ∫O <b>${formatK(r.orgTime)}</b></span>` +
+      `</div>`;
+  }
+  DOM.searchTop.innerHTML = html;
+  DOM.searchTop.querySelectorAll('.search-row').forEach(row => {
+    row.addEventListener('click', () => {
+      const idx = +row.dataset.idx;
+      const r = sortedResults()[idx];
+      if (!r) return;
+      Object.assign(params, r.params);
+      syncParamSliders();
+      initSim();
+    });
+  });
+}
+
+function syncParamSliders() {
+  if (!DOM.params) return;
+  const rows = DOM.params.querySelectorAll('.param');
+  for (let i = 0; i < rows.length && i < PARAM_DEFS.length; i++) {
+    const [label, key, lo, hi, step, decimals] = PARAM_DEFS[i];
+    const input = rows[i].querySelector('input');
+    const val   = rows[i].querySelector('.val');
+    if (input) input.value = params[key];
+    if (val)   val.textContent = (+params[key]).toFixed(decimals);
+  }
+}
+
+async function runSearch() {
+  if (searchState.running) return;
+  const nTrials   = Math.max(1, +DOM.srTrials.value | 0);
+  const nTicks    = Math.max(100, +DOM.srTicks.value | 0);
+  const chunkSize = 250;
+
+  searchState.running = true;
+  searchState.abort   = false;
+  searchState.results = [];
+  searchState.savedParams = { ...params };
+  searchState.prevPlaying = playing;
+  playing = false;
+
+  DOM.btnSearch.disabled         = true;
+  DOM.btnSearchStop.disabled     = false;
+  DOM.btnSearchApplyBest.disabled = true;
+  DOM.btnSearchRestore.disabled  = true;
+  DOM.srState.style.display      = 'inline-block';
+  DOM.searchProgress.style.display = 'block';
+  DOM.searchTop.innerHTML        = '';
+  document.body.classList.add('searching');
+
+  for (let trial = 0; trial < nTrials; trial++) {
+    if (searchState.abort) break;
+
+    // Sample random params within search bounds
+    for (const [k, lo, hi] of SEARCH_RANGES) {
+      params[k] = lo + Math.random() * (hi - lo);
+    }
+    const trialParams = { ...params };
+    initSim();
+
+    let extinctAt = -1;
+    let lastTick  = 0;
+    for (let t = 0; t < nTicks; t += chunkSize) {
+      const end = Math.min(t + chunkSize, nTicks);
+      for (let tt = t; tt < end; tt++) stepSim();
+      lastTick = end;
+      if (orgs.length === 0 && extinctAt < 0) extinctAt = end;
+      updateSearchProgress(trial, nTrials, end, nTicks, extinctAt);
+      await new Promise(r => setTimeout(r, 0));
+      if (searchState.abort) break;
+      if (extinctAt >= 0) break;  // early termination
+    }
+    if (searchState.abort) break;
+
+    searchState.results.push({
+      score:     fitness(extinctAt, nTicks, orgs.length, maxGen, totalOrgTime),
+      extinctAt,
+      ticksRun:  extinctAt < 0 ? nTicks : extinctAt,
+      finalPop:  orgs.length,
+      maxGen,
+      orgTime:   totalOrgTime,
+      params:    trialParams,
+    });
+    renderSearchResults();
+  }
+
+  // Cleanup
+  searchState.running = false;
+  DOM.btnSearch.disabled         = false;
+  DOM.btnSearchStop.disabled     = true;
+  DOM.srState.style.display      = 'none';
+  DOM.searchProgress.style.display = 'none';
+  document.body.classList.remove('searching');
+
+  if (searchState.results.length > 0 && !searchState.abort) {
+    const best = sortedResults()[0];
+    Object.assign(params, best.params);
+    syncParamSliders();
+    initSim();
+    DOM.btnSearchApplyBest.disabled = false;
+    DOM.btnSearchRestore.disabled   = false;
+  } else {
+    Object.assign(params, searchState.savedParams);
+    syncParamSliders();
+    initSim();
+  }
+  playing = searchState.prevPlaying;
+  DOM.btnPlay.textContent = playing ? '⏸ Pause' : '▶ Play';
+  DOM.btnPlay.classList.toggle('primary', playing);
+}
+
+function stopSearch() {
+  searchState.abort = true;
+}
+
+function applyBestResult() {
+  const best = sortedResults()[0];
+  if (!best) return;
+  Object.assign(params, best.params);
+  syncParamSliders();
+  initSim();
+}
+
+function restoreSavedParams() {
+  if (!searchState.savedParams) return;
+  Object.assign(params, searchState.savedParams);
+  syncParamSliders();
+  initSim();
+}
+
 /* -------- MAIN LOOP -------- */
 function render() {
   renderFields();
@@ -1332,15 +1667,19 @@ function showLoopError(err) {
 
 function loop(now) {
   try {
-    if (playing) {
-      for (let i = 0; i < stepsPerFrame; i++) stepSim();
-      if (orgs.length === 0) {
-        for (let i = 0; i < 15; i++) orgs.push(newOrganism(Math.random()*W, Math.random()*H, null));
+    // During bruteforce, runSearch drives stepSim directly — skip render
+    // and HUD entirely so the search burns through trials at full speed.
+    if (!searchState.running) {
+      if (playing) {
+        for (let i = 0; i < stepsPerFrame; i++) stepSim();
+        if (orgs.length === 0) {
+          for (let i = 0; i < 15; i++) orgs.push(newOrganism(Math.random()*W, Math.random()*H, null));
+        }
       }
+      render();
+      updateHUD(now || performance.now());
+      updateInspector();
     }
-    render();
-    updateHUD(now || performance.now());
-    updateInspector();
   } catch (err) {
     showLoopError(err);
   }
