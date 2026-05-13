@@ -408,6 +408,47 @@
     opacity: 0.4;
     cursor: not-allowed;
   }
+  .trait {
+    margin-bottom: 7px;
+    font-family: var(--mono);
+    font-size: 11px;
+  }
+  .trait-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin-bottom: 3px;
+  }
+  .trait-name { color: var(--text); font-weight: 500; }
+  .trait-val  { color: var(--dim); font-size: 10px; }
+  .trait-bar {
+    position: relative;
+    height: 6px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    overflow: hidden;
+  }
+  .trait-fill {
+    position: absolute;
+    height: 100%;
+    background: rgba(93,210,255,0.28);
+    transition: left 0.25s ease, width 0.25s ease;
+  }
+  .trait-tick {
+    position: absolute;
+    height: 100%;
+    width: 2px;
+    background: var(--accent);
+    transition: left 0.25s ease;
+  }
+  .trait-axis {
+    display: flex;
+    justify-content: space-between;
+    font-size: 9px;
+    color: var(--faint);
+    margin-top: 1px;
+  }
   @media (max-width: 1100px) {
     main { grid-template-columns: 1fr 340px; }
   }
@@ -469,6 +510,11 @@
         </div>
         <div class="action-bar" id="actionBar" title="distribution of current actions"></div>
         <div class="action-bar-legend" id="actionLegend"></div>
+      </section>
+
+      <section>
+        <h2>Trait distributions <span style="font-weight:400;color:var(--faint);text-transform:none;letter-spacing:0;">— evolved across population</span></h2>
+        <div id="traitStats"></div>
       </section>
 
       <section>
@@ -534,79 +580,101 @@ const W = 160, H = 100;
 const CELL = 6;
 const CW = W * CELL, CH = H * CELL;
 
-const NUM_ACTIONS = 9;
-const ACT = { MN:0, MS:1, ME:2, MW:3, HARVEST:4, REPAIR:5, REST:6, REPRO:7, SIGNAL:8 };
-const ACTION_LABELS = ['↑N','↓S','→E','←W','harvest','repair','rest','repro','signal'];
+// Action set is now five discrete behaviours. Locomotion is no longer a
+// discrete action — every organism integrates continuous (vx, vy)
+// velocity each tick from two analog "motor" outputs of the genome.
+const NUM_ACTIONS = 5;
+const ACT = { HARVEST:0, REPAIR:1, REST:2, REPRO:3, SIGNAL:4 };
+const ACTION_LABELS = ['harvest','repair','rest','repro','signal'];
 const ACTION_COLORS = [
-  '#5b6b7e','#5b6b7e','#5b6b7e','#5b6b7e',
   '#6bcb77','#ffd166','#3d4a5c','#ff7eb6','#5dd2ff',
 ];
 
 const MEM_DIM = 4;
+const NUM_MOTORS = 2;
 const PERCEPT_DIM = 8;            // R, dRx, dRy, H, dHx, dHy, S, neighbors
 const FEAT_DIM = PERCEPT_DIM + 2 + MEM_DIM + 1;   // + E,O + memory + bias
-const GENOME_ROWS = NUM_ACTIONS + MEM_DIM;
-const GENOME_SIZE = GENOME_ROWS * FEAT_DIM;
+const MOTOR_OFFSET = NUM_ACTIONS;                  // motor rows live after action rows
+const MEM_OFFSET   = MOTOR_OFFSET + NUM_MOTORS;    // memory rows live after motors
+const GENOME_ROWS  = NUM_ACTIONS + NUM_MOTORS + MEM_DIM;  // 5 + 2 + 4 = 11
+const GENOME_SIZE  = GENOME_ROWS * FEAT_DIM;
 
 // indices into feature vector
 const FI = { R:0, dRx:1, dRy:2, H:3, dHx:4, dHy:5, S:6, N:7, E:8, O:9, M0:10, M1:11, M2:12, M3:13, BIAS:14 };
 
-// Defaults retuned for sustained lineages at boot. Earlier values were
-// too tight: E_init=3 with baseCost=0.05 gave ~60 ticks before starvation,
-// and E_rep=7.5 needed +4.5 E from a perfect policy in that window. Any
-// noise in the initial action selection led to mass extinction before
-// the first reproduction. New defaults give organisms a survivable
-// budget while keeping the physics interesting.
+// `params` now holds only environment-level and universal physical
+// constants. Per-organism physiology (eta, repair α, decay λ,
+// metabolism, max speed, harvest rate) is stored inside each organism
+// as o.T, mutated multiplicatively at reproduction, so the population
+// drifts statistically under selection.
 const params = {
-  regen:        0.0035,
-  hDecay:       0.012,
-  hNoise:       0.0018,
-  lambda:       0.0025,
-  hazardDmg:    0.040,
-  baseCost:     0.035,
-  moveCost:     0.050,
-  repairCost:   0.50,
-  repairAlpha:  0.45,
-  harvestRate:  0.32,
-  eta:          0.65,
-  wasteCoef:    0.85,
-  E_rep:        5.5,
-  O_rep:        0.45,
-  E_birth:      3.0,
-  O_birth:      0.10,
-  E_init:       4.0,
-  O_init:       0.85,
-  mutation:     0.06,
-  initPop:      80,
-  maxPop:       500,
+  // Environment dynamics
+  regen:         0.0035,
+  hDecay:        0.012,
+  hNoise:        0.0018,
+  // Universal physics
+  hazardDmg:     0.040,
+  baseCost:      0.035,
+  moveCostCoef:  0.014,   // multiplier on v² for kinetic energy cost
+  repairCost:    0.50,
+  wasteCoef:     0.85,
+  // Reproductive thresholds (apply to every lineage)
+  E_rep:         5.5,
+  O_rep:         0.45,
+  E_birth:       3.0,
+  O_birth:       0.10,
+  E_init:        4.0,
+  O_init:        0.85,
+  // Mutation strengths
+  mutation:      0.06,   // genome (action policy) mutation σ
+  traitMutation: 0.05,   // per-organism trait mutation σ (multiplicative)
+  // Population bounds
+  initPop:       80,
+  maxPop:        500,
 };
 
+// Heritable physical traits. Each organism carries its own copy in o.T;
+// at reproduction these are mutated multiplicatively (lognormal) so they
+// stay strictly positive, then clamped to bounds. The init values seed
+// the founding population with a tight distribution around the mean.
+const TRAIT_DEFS = {
+  eta:         { init: 0.65,   min: 0.10,    max: 0.95,   label: 'η',      short: 'eta'    },
+  repairAlpha: { init: 0.45,   min: 0.05,    max: 0.90,   label: 'α',      short: 'alpha'  },
+  lambdaOrg:   { init: 0.0025, min: 0.0005,  max: 0.020,  label: 'λ',      short: 'lambda' },
+  speed:       { init: 0.45,   min: 0.05,    max: 2.0,    label: 'speed',  short: 'speed'  },
+  harvestRate: { init: 0.32,   min: 0.05,    max: 0.80,   label: 'harv.',  short: 'harv'   },
+  metabolism:  { init: 1.0,    min: 0.40,    max: 2.0,    label: 'met.',   short: 'met'    },
+};
+const TRAIT_KEYS = Object.keys(TRAIT_DEFS);
+
+// Sliders now expose only universal physics + thresholds; physiology
+// (η, α, λ, speed, harvest rate, metabolism) is per-organism so changing
+// a global slider for those would do nothing.
 const PARAM_DEFS = [
-  ['λ decay',     'lambda',     0.0,   0.020, 0.0005, 4],
-  ['η efficiency','eta',        0.10,  1.00,  0.01,   2],
-  ['mutation σ',  'mutation',   0.00,  0.30,  0.005,  3],
-  ['regen',       'regen',      0.0,   0.020, 0.0005, 4],
-  ['hazard dmg',  'hazardDmg',  0.0,   0.30,  0.005,  3],
-  ['hazard noise','hNoise',     0.0,   0.020, 0.0005, 4],
-  ['repair α',    'repairAlpha',0.05,  1.0,   0.01,   2],
-  ['harvest rate','harvestRate',0.05,  1.0,   0.01,   2],
-  ['E_rep',       'E_rep',      2.0,   20.0,  0.5,    1],
-  ['O_rep',       'O_rep',      0.10,  0.95,  0.01,   2],
+  ['regen',          'regen',         0.0,   0.020, 0.0005, 4],
+  ['hazard dmg',     'hazardDmg',     0.0,   0.30,  0.005,  3],
+  ['hazard noise',   'hNoise',        0.0,   0.020, 0.0005, 4],
+  ['baseCost',       'baseCost',      0.005, 0.10,  0.001,  3],
+  ['move cost',      'moveCostCoef',  0.0,   0.10,  0.001,  3],
+  ['E_rep',          'E_rep',         2.0,   20.0,  0.5,    1],
+  ['O_rep',          'O_rep',         0.10,  0.95,  0.01,   2],
+  ['genome σ',       'mutation',      0.00,  0.30,  0.005,  3],
+  ['trait σ',        'traitMutation', 0.00,  0.20,  0.005,  3],
 ];
 
-// Search bounds — biased toward survivable regimes so most trials don't
-// instantly extinct. Sliders in PARAM_DEFS allow wider exploration manually.
+// Search bounds — biased toward survivable regimes. With traits evolving,
+// the search now varies environmental + thermodynamic constants; let
+// natural selection handle physiology.
 const SEARCH_RANGES = [
-  ['lambda',      0.0005, 0.0040],
-  ['eta',         0.50,   0.85],
-  ['regen',       0.0025, 0.0080],
-  ['hazardDmg',   0.005,  0.060],
-  ['hNoise',      0.0,    0.0030],
-  ['repairAlpha', 0.30,   0.80],
-  ['harvestRate', 0.22,   0.55],
-  ['E_rep',       3.5,    8.0],
-  ['O_rep',       0.30,   0.60],
-  ['mutation',    0.03,   0.10],
+  ['regen',         0.0025, 0.0080],
+  ['hazardDmg',     0.005,  0.060],
+  ['hNoise',        0.0,    0.0030],
+  ['baseCost',      0.020,  0.055],
+  ['moveCostCoef',  0.005,  0.030],
+  ['E_rep',         3.5,    8.0],
+  ['O_rep',         0.30,   0.60],
+  ['mutation',      0.03,   0.10],
+  ['traitMutation', 0.02,   0.10],
 ];
 
 const searchState = {
@@ -678,52 +746,40 @@ function makeWorld() {
 /* -------- GENOME -------- */
 function newGenome() {
   const g = new Float32Array(GENOME_SIZE);
-  // Smaller initial noise so explicit priors aren't washed out by ±0.3
-  // contributions summed over 15 features.
+  // Small initial noise so explicit priors dominate at boot. Evolution
+  // refines the unbiased weights via mutation.
   for (let i = 0; i < g.length; i++) g[i] = (Math.random() - 0.5) * 0.25;
 
-  // Movement: follow the resource gradient, BUT strongly suppressed when
-  // the current cell already has resource. Previously the gradient term
-  // (×4 in perception) routinely beat the harvest score at moderate R,
-  // so organisms wandered themselves to death.
-  const mvGrad = 0.75;
-  g[ACT.MN * FEAT_DIM + FI.dRy] = -mvGrad;
-  g[ACT.MS * FEAT_DIM + FI.dRy] =  mvGrad;
-  g[ACT.ME * FEAT_DIM + FI.dRx] =  mvGrad;
-  g[ACT.MW * FEAT_DIM + FI.dRx] = -mvGrad;
-  for (const a of [ACT.MN, ACT.MS, ACT.ME, ACT.MW]) {
-    g[a * FEAT_DIM + FI.R]    = -1.2;  // stay put when R is here
-    g[a * FEAT_DIM + FI.BIAS] = -0.5;  // baseline cost-aware
-  }
-  // Avoid hazards
-  g[ACT.MN * FEAT_DIM + FI.dHy] =  0.5;
-  g[ACT.MS * FEAT_DIM + FI.dHy] = -0.5;
-  g[ACT.ME * FEAT_DIM + FI.dHx] = -0.5;
-  g[ACT.MW * FEAT_DIM + FI.dHx] =  0.5;
-
-  // HARVEST: dominant when local R is non-trivial. Mild negative E so it
-  // eases off slightly once an organism is full.
+  // === Discrete action priors (rows 0..NUM_ACTIONS-1) ===
+  // HARVEST — dominant when local R is non-trivial; eases off when full.
   g[ACT.HARVEST * FEAT_DIM + FI.R]    =  4.0;
   g[ACT.HARVEST * FEAT_DIM + FI.H]    = -1.0;
   g[ACT.HARVEST * FEAT_DIM + FI.E]    = -0.2;
-
-  // REPAIR: only when O drops well below 0.5 AND energy is available.
+  // REPAIR — competes only when O drops well below 0.5 and E exists.
   g[ACT.REPAIR * FEAT_DIM + FI.O]    = -3.5;
   g[ACT.REPAIR * FEAT_DIM + FI.E]    =  0.8;
   g[ACT.REPAIR * FEAT_DIM + FI.BIAS] =  1.6;
-
-  // REPRO: scales with both E and O. Bias tuned so HARVEST wins until
-  // E is comfortably above E_rep≈5.5; then REPRO takes over and fires.
+  // REST — fallback at very low energy.
+  g[ACT.REST * FEAT_DIM + FI.E]    = -1.4;
+  g[ACT.REST * FEAT_DIM + FI.BIAS] = -1.2;
+  // REPRO — fires once E comfortably exceeds E_rep.
   g[ACT.REPRO * FEAT_DIM + FI.E]    =  2.5;
   g[ACT.REPRO * FEAT_DIM + FI.O]    =  2.0;
   g[ACT.REPRO * FEAT_DIM + FI.BIAS] = -1.8;
-
-  // REST: last-resort fallback when E is very low.
-  g[ACT.REST * FEAT_DIM + FI.E]    = -1.4;
-  g[ACT.REST * FEAT_DIM + FI.BIAS] = -1.2;
-
-  // SIGNAL: rare by default; evolution may discover use cases.
+  // SIGNAL — rare by default.
   g[ACT.SIGNAL * FEAT_DIM + FI.BIAS] = -1.6;
+
+  // === Motor priors (rows NUM_ACTIONS, NUM_ACTIONS+1) ===
+  // Motor outputs pass through tanh in stepSim so range is ±1. They
+  // climb the resource gradient, retreat from hazard gradient, and
+  // brake on cells that already have resource here.
+  const mvGrad = 0.9;
+  g[(MOTOR_OFFSET + 0) * FEAT_DIM + FI.dRx] =  mvGrad;
+  g[(MOTOR_OFFSET + 0) * FEAT_DIM + FI.dHx] = -0.6;
+  g[(MOTOR_OFFSET + 0) * FEAT_DIM + FI.R]   = -0.4; // brake on resource
+  g[(MOTOR_OFFSET + 1) * FEAT_DIM + FI.dRy] =  mvGrad;
+  g[(MOTOR_OFFSET + 1) * FEAT_DIM + FI.dHy] = -0.6;
+  g[(MOTOR_OFFSET + 1) * FEAT_DIM + FI.R]   = -0.4;
 
   return g;
 }
@@ -736,29 +792,56 @@ function mutateGenome(g, sigma) {
   return out;
 }
 
+function initTraits() {
+  // Seed founders with a tight lognormal spread around each init value,
+  // so the very first selection has a distribution to act on.
+  const T = {};
+  for (const k of TRAIT_KEYS) {
+    const def = TRAIT_DEFS[k];
+    T[k] = clamp(def.init * Math.exp(0.06 * gauss()), def.min, def.max);
+  }
+  return T;
+}
+
+function mutateTraits(parentT, sigma) {
+  // Multiplicative (lognormal) mutation. Keeps traits strictly positive
+  // and yields scale-symmetric exploration; e.g. with σ=0.05 a trait
+  // typically shifts by ±5% per generation.
+  const T = {};
+  for (const k of TRAIT_KEYS) {
+    const def = TRAIT_DEFS[k];
+    const v = parentT[k] * Math.exp(sigma * gauss());
+    T[k] = Number.isFinite(v) ? clamp(v, def.min, def.max) : def.init;
+  }
+  return T;
+}
+
 function newOrganism(x, y, parent) {
   const id = nextId++;
-  let G, hue, lineage, generation;
+  let G, hue, lineage, generation, T;
   if (parent) {
     G = mutateGenome(parent.G, params.mutation);
     hue = (parent.hue + (Math.random() - 0.5) * 16 + 360) % 360;
     lineage = parent.lineage;
     generation = parent.generation + 1;
     if (generation > maxGen) maxGen = generation;
+    T = mutateTraits(parent.T, params.traitMutation);
   } else {
     G = newGenome();
     hue = Math.random() * 360;
     lineage = id;
     generation = 0;
+    T = initTraits();
   }
   return {
     id, parent: parent ? parent.id : null,
     lineage, generation,
     x, y, px: x, py: y,
+    vx: 0, vy: 0,                  // continuous velocity, in cells/tick
     E: params.E_init,
     O: params.O_init,
     M: new Float32Array(MEM_DIM),
-    G,
+    G, T,
     age: 0,
     hue,
     action: -1,
@@ -818,13 +901,19 @@ function features(o, P) {
   ];
 }
 
+// Dot product of one genome row with the feature vector.
+function dotRow(G, rowIdx, feats) {
+  let s = 0;
+  const off = rowIdx * FEAT_DIM;
+  for (let j = 0; j < FEAT_DIM; j++) s += G[off + j] * feats[j];
+  return s;
+}
+
 function updateMemory(o, feats) {
   const beta = 0.35;
   const newM = new Float32Array(MEM_DIM);
   for (let i = 0; i < MEM_DIM; i++) {
-    let s = 0;
-    const row = (NUM_ACTIONS + i) * FEAT_DIM;
-    for (let j = 0; j < FEAT_DIM; j++) s += o.G[row + j] * feats[j];
+    const s = dotRow(o.G, MEM_OFFSET + i, feats);
     let v = (1 - beta) * o.M[i] + beta * Math.tanh(s);
     if (v !== v) { v = 0; warnNaN('memory update'); }
     newM[i] = v;
@@ -835,12 +924,18 @@ function updateMemory(o, feats) {
 function chooseAction(o, feats) {
   let bestA = 0, bestS = -Infinity;
   for (let a = 0; a < NUM_ACTIONS; a++) {
-    let s = 0;
-    const row = a * FEAT_DIM;
-    for (let j = 0; j < FEAT_DIM; j++) s += o.G[row + j] * feats[j];
+    const s = dotRow(o.G, a, feats);
     if (s > bestS) { bestS = s; bestA = a; }
   }
   return bestA;
+}
+
+// Read the two analog motor outputs. Each is genome-row · features
+// squashed by tanh, then scaled by the organism's evolved max speed.
+function motorOutputs(o, feats) {
+  const mx = Math.tanh(dotRow(o.G, MOTOR_OFFSET + 0, feats));
+  const my = Math.tanh(dotRow(o.G, MOTOR_OFFSET + 1, feats));
+  return { mx: mx * o.T.speed, my: my * o.T.speed };
 }
 
 function popGrid() {
@@ -870,60 +965,76 @@ function stepSim() {
     updateMemory(o, feats);
 
     const Hloc = getH(o.x, o.y);
-    o.O -= params.lambda * o.O + params.hazardDmg * Hloc;
-    o.E -= params.baseCost;
+    // Integrity decay uses the organism's own λ trait (heritable).
+    // Hazards from the environment still apply universally.
+    o.O -= o.T.lambdaOrg * o.O + params.hazardDmg * Hloc;
+    // Baseline metabolic cost scales with the organism's metabolism
+    // trait (faster metabolisms harvest harder but pay more idle).
+    o.E -= params.baseCost * o.T.metabolism;
 
-    // Death: O or E exhausted, OR state became non-finite. NaN <= 0 is
-    // false, so a corrupted organism would otherwise survive forever
-    // and re-poison the world with NaN.
+    // Death: O or E exhausted, OR state became non-finite. NaN ≤ 0 is
+    // false, so a corrupted organism would otherwise survive forever.
     if (o.O <= 0 || o.E <= 0 ||
         o.O !== o.O || o.E !== o.E ||
         o.x !== o.x || o.y !== o.y) {
       if (o.O !== o.O || o.E !== o.E) warnNaN('org state (E/O)');
-      const i = idxXY(o.x !== o.x ? 0 : o.x, o.y !== o.y ? 0 : o.y);
+      const fx = o.x !== o.x ? 0 : o.x;
+      const fy = o.y !== o.y ? 0 : o.y;
+      const i = idxXY(fx, fy);
       Hf[i] = clamp(Hf[i] + 0.12, 0, 1);
       R[i] = clamp(R[i] + 0.04, 0, 1);
       deaths++;
-      spawnDeathFx({ x: o.x !== o.x ? 0 : o.x, y: o.y !== o.y ? 0 : o.y, hue: o.hue });
+      spawnDeathFx({ x: fx, y: fy, hue: o.hue });
       if (o.id === selectedId) selectedId = null;
       continue;
     }
 
+    // === Continuous locomotion ===
+    // Two analog motor outputs drive a desired velocity. Inertia smooths
+    // direction changes (0.7 retention, 0.3 update), so organisms glide
+    // rather than teleport between cells. Kinetic-energy cost is paid
+    // out of E and scales with v² × metabolism.
+    const { mx, my } = motorOutputs(o, feats);
+    o.vx = 0.7 * o.vx + 0.3 * mx;
+    o.vy = 0.7 * o.vy + 0.3 * my;
+    o.x += o.vx;
+    o.y += o.vy;
+    const speed2 = o.vx * o.vx + o.vy * o.vy;
+    o.E -= params.moveCostCoef * speed2 * o.T.metabolism;
+
+    // === Discrete behaviour ===
     const a = chooseAction(o, feats);
     o.action = a;
     actCount[a]++;
 
     switch (a) {
-      case ACT.MN: o.y -= 1; o.E -= params.moveCost; break;
-      case ACT.MS: o.y += 1; o.E -= params.moveCost; break;
-      case ACT.ME: o.x += 1; o.E -= params.moveCost; break;
-      case ACT.MW: o.x -= 1; o.E -= params.moveCost; break;
       case ACT.HARVEST: {
         const i = idxXY(o.x, o.y);
-        // R[i] is undefined for out-of-range indices (would yield NaN
-        // through Math.min); treat as 0 just in case.
         const ri = Number.isFinite(R[i]) ? R[i] : 0;
-        const amt = Math.min(params.harvestRate, ri);
-        o.E += params.eta * amt;
+        const amt = Math.min(o.T.harvestRate, ri);
+        o.E += o.T.eta * amt;
         R[i] = clamp(ri - amt, 0, 1);
-        Hf[i] = clamp((Number.isFinite(Hf[i]) ? Hf[i] : 0) + amt * params.wasteCoef * (1 - params.eta), 0, 1);
+        Hf[i] = clamp((Number.isFinite(Hf[i]) ? Hf[i] : 0)
+                      + amt * params.wasteCoef * (1 - o.T.eta), 0, 1);
         if (amt > 0.05) spawnHarvestFx(o);
         break;
       }
       case ACT.REPAIR: {
         const e = Math.min(params.repairCost, o.E);
         o.E -= e;
-        o.O = clamp(o.O + params.repairAlpha * e * (1 - o.O), 0, 1);
+        o.O = clamp(o.O + o.T.repairAlpha * e * (1 - o.O), 0, 1);
         break;
       }
       case ACT.REST: {
-        o.E += params.baseCost * 0.55; // refund most baseline cost
+        // Refund most of the baseline metabolic cost; net cost ≈ 45%.
+        o.E += params.baseCost * 0.55 * o.T.metabolism;
         break;
       }
       case ACT.REPRO: {
-        if (o.E > params.E_rep && o.O > params.O_rep && orgs.length + next.length < params.maxPop) {
-          const cx = o.x + gauss() * 0.9;
-          const cy = clamp(o.y + gauss() * 0.9, 0, H-1);
+        if (o.E > params.E_rep && o.O > params.O_rep &&
+            orgs.length + next.length < params.maxPop) {
+          const cx = o.x + gauss() * 0.6;
+          const cy = clamp(o.y + gauss() * 0.6, 0, H - 1);
           const child = newOrganism(cx, cy, o);
           next.push(child);
           o.E -= params.E_birth;
@@ -939,6 +1050,7 @@ function stepSim() {
       }
     }
 
+    // Toroidal wrap horizontally, clamp vertically.
     o.x = ((o.x % W) + W) % W;
     o.y = clamp(o.y, 0, H - 0.001);
     o.age++;
@@ -1107,8 +1219,8 @@ function renderOrgs() {
     if (!Number.isFinite(px) || !Number.isFinite(py) ||
         !Number.isFinite(size) || size <= 0) continue;
 
-    // action halo
-    if (o.action >= 4 && o.action !== ACT.REST) {
+    // action halo for harvest / repair / reproduce
+    if (o.action === ACT.HARVEST || o.action === ACT.REPAIR || o.action === ACT.REPRO) {
       const col = ACTION_COLORS[o.action];
       const halo = ctx.createRadialGradient(px, py, size, px, py, size + 9);
       halo.addColorStop(0, col + '55');
@@ -1117,6 +1229,17 @@ function renderOrgs() {
       ctx.beginPath();
       ctx.arc(px, py, size + 9, 0, Math.PI*2);
       ctx.fill();
+    }
+
+    // velocity tail — short line in the direction of motion
+    const v2 = o.vx * o.vx + o.vy * o.vy;
+    if (v2 > 0.0025) {
+      ctx.beginPath();
+      ctx.moveTo(px, py);
+      ctx.lineTo(px + o.vx * CELL * 2.2, py + o.vy * CELL * 2.2);
+      ctx.strokeStyle = `hsla(${o.hue}, 75%, 65%, ${0.25 + 0.3 * opacityO})`;
+      ctx.lineWidth = 1;
+      ctx.stroke();
     }
 
     // outer glow
@@ -1221,7 +1344,8 @@ function cacheDOM() {
     'params','errBanner',
     'btnSearch','btnSearchStop','btnSearchApplyBest','btnSearchRestore',
     'srTrials','srTicks','srBar','srText','srState',
-    'searchProgress','searchTop'];
+    'searchProgress','searchTop',
+    'traitStats'];
   const missing = [];
   for (const id of ids) {
     const el = document.getElementById(id);
@@ -1285,6 +1409,9 @@ function updateHUD(now) {
     actionBarSegs[a].style.width = pct + '%';
     actionBarSegs[a].title = `${ACTION_LABELS[a]}: ${counts[a]}`;
   }
+
+  // Population-level trait distribution (means and ±1σ bands).
+  updateTraitStats();
 }
 
 function buildActionLegend() {
@@ -1294,6 +1421,72 @@ function buildActionLegend() {
     const sp = document.createElement('span');
     sp.innerHTML = `<i style="background:${ACTION_COLORS[a]}"></i>${ACTION_LABELS[a]}`;
     leg.appendChild(sp);
+  }
+}
+
+// Trait panel — built once, then mutated in place each tick by
+// updateTraitStats. Each row shows: name, current population mean ± std,
+// a bar with a tick at the mean and a translucent fill spanning ±1σ
+// across the [min, max] range from TRAIT_DEFS.
+const traitNodes = {};
+function buildTraitStatsPanel() {
+  if (!DOM.traitStats) return;
+  let html = '';
+  for (const k of TRAIT_KEYS) {
+    const def = TRAIT_DEFS[k];
+    html += `<div class="trait">
+      <div class="trait-head">
+        <span class="trait-name">${def.label}</span>
+        <span class="trait-val" data-k="${k}_v">—</span>
+      </div>
+      <div class="trait-bar">
+        <div class="trait-fill" data-k="${k}_fill"></div>
+        <div class="trait-tick" data-k="${k}_tick"></div>
+      </div>
+    </div>`;
+  }
+  DOM.traitStats.innerHTML = html;
+  for (const k of TRAIT_KEYS) {
+    traitNodes[k] = {
+      val:  DOM.traitStats.querySelector(`[data-k="${k}_v"]`),
+      fill: DOM.traitStats.querySelector(`[data-k="${k}_fill"]`),
+      tick: DOM.traitStats.querySelector(`[data-k="${k}_tick"]`),
+    };
+  }
+}
+
+function updateTraitStats() {
+  if (!DOM.traitStats) return;
+  if (orgs.length === 0) {
+    for (const k of TRAIT_KEYS) {
+      const n = traitNodes[k];
+      if (!n) continue;
+      n.val.textContent = '—';
+      n.fill.style.width = '0%';
+      n.tick.style.left = '0%';
+    }
+    return;
+  }
+  for (const k of TRAIT_KEYS) {
+    const def = TRAIT_DEFS[k];
+    let sum = 0, sum2 = 0;
+    for (const o of orgs) {
+      const v = o.T ? o.T[k] : def.init;
+      sum  += v;
+      sum2 += v * v;
+    }
+    const mean = sum / orgs.length;
+    const variance = sum2 / orgs.length - mean * mean;
+    const std  = Math.sqrt(Math.max(0, variance));
+    const range = def.max - def.min;
+    const pctMean = clamp(((mean - def.min) / range) * 100, 0, 100);
+    const pctStd  = clamp((std / range) * 100, 0, 50);
+    const n = traitNodes[k];
+    if (!n) continue;
+    n.val.textContent = mean.toFixed(mean < 0.01 ? 4 : 3) + ' ±' + std.toFixed(std < 0.01 ? 4 : 3);
+    n.fill.style.left  = Math.max(0, pctMean - pctStd) + '%';
+    n.fill.style.width = Math.min(100, pctStd * 2) + '%';
+    n.tick.style.left  = pctMean + '%';
   }
 }
 
@@ -1318,28 +1511,40 @@ function buildInspectorDom(o) {
   pill.style.color = `hsl(${o.hue}, 70%, 70%)`;
   pill.style.borderColor = `hsla(${o.hue}, 70%, 50%, 0.35)`;
 
+  const traitRows = TRAIT_KEYS.map(k =>
+    `<div class="inspector-row"><span class="k">${TRAIT_DEFS[k].label}</span><span class="v" data-k="t_${k}"></span></div>`
+  ).join('');
   DOM.inspBody.innerHTML = `
     <div class="inspector-row"><span class="k">lineage</span><span class="v">${o.lineage} · gen ${o.generation}</span></div>
     <div class="inspector-row"><span class="k">parent</span><span class="v">${o.parent ? '#' + o.parent : '— (founder)'}</span></div>
     <div class="inspector-row"><span class="k">age</span><span class="v" data-k="age"></span></div>
     <div class="inspector-row"><span class="k">position</span><span class="v" data-k="pos"></span></div>
+    <div class="inspector-row"><span class="k">velocity</span><span class="v" data-k="vel"></span></div>
     <div class="inspector-row"><span class="k">E (energy)</span><span class="v" data-k="E"></span></div>
     <div class="inspector-row"><span class="k">O (integrity)</span><span class="v" data-k="O"></span></div>
     <div class="inspector-row"><span class="k">M (memory)</span><span class="v" data-k="M"></span></div>
     <div class="inspector-row"><span class="k">last action</span><span class="v" data-k="action"></span></div>
+    <div style="margin:6px 0 2px; font-size:10px; color:var(--faint); text-transform:uppercase; letter-spacing:0.06em;">heritable traits</div>
+    ${traitRows}
     <div class="genome">
       <canvas id="gCanvas"></canvas>
-      <div class="caption"><span>rows: 9 actions + 4 mem-update</span><span>cols: ${FEAT_DIM} features</span></div>
+      <div class="caption"><span>rows: ${NUM_ACTIONS} actions + ${NUM_MOTORS} motors + ${MEM_DIM} mem</span><span>cols: ${FEAT_DIM} feat</span></div>
     </div>
   `;
   inspectorState.id = o.id;
+  const traitNodeMap = {};
+  for (const k of TRAIT_KEYS) {
+    traitNodeMap[k] = DOM.inspBody.querySelector(`[data-k="t_${k}"]`);
+  }
   inspectorState.nodes = {
     age:    DOM.inspBody.querySelector('[data-k="age"]'),
     pos:    DOM.inspBody.querySelector('[data-k="pos"]'),
+    vel:    DOM.inspBody.querySelector('[data-k="vel"]'),
     E:      DOM.inspBody.querySelector('[data-k="E"]'),
     O:      DOM.inspBody.querySelector('[data-k="O"]'),
     M:      DOM.inspBody.querySelector('[data-k="M"]'),
     action: DOM.inspBody.querySelector('[data-k="action"]'),
+    traits: traitNodeMap,
   };
   drawGenomeHeatmap(o);
 }
@@ -1388,10 +1593,20 @@ function updateInspector() {
   if (!n) return;
   n.age.textContent = `${o.age} ticks`;
   n.pos.textContent = `${o.x.toFixed(1)}, ${o.y.toFixed(1)}`;
+  const speed = Math.sqrt((o.vx||0)*(o.vx||0) + (o.vy||0)*(o.vy||0));
+  if (n.vel) n.vel.textContent = `(${(o.vx||0).toFixed(2)}, ${(o.vy||0).toFixed(2)}) |v|=${speed.toFixed(2)}`;
   n.E.textContent   = o.E.toFixed(2);
   n.O.textContent   = o.O.toFixed(3);
   n.M.textContent   = Array.from(o.M).map(v => v.toFixed(2)).join('  ');
   n.action.textContent = o.action >= 0 ? ACTION_LABELS[o.action] : '—';
+  if (n.traits && o.T) {
+    for (const k of TRAIT_KEYS) {
+      const node = n.traits[k];
+      if (!node) continue;
+      const v = o.T[k];
+      node.textContent = (v < 0.01 ? v.toFixed(4) : v.toFixed(3));
+    }
+  }
 }
 
 /* -------- UI WIRING -------- */
@@ -1731,6 +1946,7 @@ function loop(now) {
     initRender();
     setupUI();
     buildActionLegend();
+    buildTraitStatsPanel();
     fpsLastUpdate = performance.now();
     requestAnimationFrame(loop);
   } catch (err) {
