@@ -507,6 +507,8 @@
           <div class="metric"><span class="label">⟨R⟩ density</span><span class="value" id="mR">—</span></div>
           <div class="metric"><span class="label">∫O dt (success)</span><span class="value" id="mInt">—</span></div>
           <div class="metric"><span class="label">births / deaths</span><span class="value" id="mBD">—</span></div>
+          <div class="metric"><span class="label">hall of fame</span><span class="value" id="mHoF">—</span></div>
+          <div class="metric"><span class="label">best ∫O ever</span><span class="value" id="mBest">—</span></div>
         </div>
         <div class="action-bar" id="actionBar" title="distribution of current actions"></div>
         <div class="action-bar-legend" id="actionLegend"></div>
@@ -688,6 +690,16 @@ const searchState = {
 let world, orgs;
 let nextId, tick, totalOrgTime, births, deaths, maxGen;
 let history;
+
+// Hall of Fame: archive of the highest-∫O-dt organisms ever recorded.
+// When the live population would otherwise go extinct or fall too low,
+// new individuals are drawn from this archive (with mutation), so the
+// hard-won evolved policy and physiology persist as a continuous
+// genetic memory instead of being replaced by random founders.
+const HOF_SIZE        = 32;
+const REINFORCE_BELOW = 18;        // pop threshold below which we drip from HoF
+let   hallOfFame = [];             // [{ G, T, hue, lineage, generation, lifeIntegral, age, deathTick }]
+let   bestEverIntegral = 0;
 let playing = true;
 let stepsPerFrame = 3;
 let selectedId = null;
@@ -846,6 +858,65 @@ function newOrganism(x, y, parent) {
     hue,
     action: -1,
     born: tick,
+    lifeIntegral: 0,               // ∫O dt over this organism's lifetime
+  };
+}
+
+// Record a dying organism into the Hall of Fame if its lifetime ∫O dt
+// beats the current worst entry. The HoF is the genetic memory that
+// keeps evolution continuous across extinction events.
+function recordToHoF(o) {
+  const li = o.lifeIntegral || 0;
+  if (li > bestEverIntegral) bestEverIntegral = li;
+  const entry = {
+    G: new Float32Array(o.G),                  // defensive copy
+    T: Object.assign({}, o.T),
+    hue: o.hue,
+    lineage: o.lineage,
+    generation: o.generation,
+    lifeIntegral: li,
+    age: o.age,
+    deathTick: tick,
+  };
+  if (hallOfFame.length < HOF_SIZE) {
+    hallOfFame.push(entry);
+  } else {
+    // Find worst entry; replace if this one is better.
+    let worstIdx = 0;
+    for (let i = 1; i < hallOfFame.length; i++) {
+      if (hallOfFame[i].lifeIntegral < hallOfFame[worstIdx].lifeIntegral) worstIdx = i;
+    }
+    if (li > hallOfFame[worstIdx].lifeIntegral) hallOfFame[worstIdx] = entry;
+  }
+  hallOfFame.sort((a, b) => b.lifeIntegral - a.lifeIntegral);
+}
+
+// Spawn a fresh organism descended from a Hall-of-Fame ancestor (top
+// third of HoF, tournament-selected). Falls back to a random founder
+// if the HoF is empty (only happens on the very first run, before any
+// organism has died).
+function spawnFromHoF(x, y) {
+  if (hallOfFame.length === 0) return newOrganism(x, y, null);
+  const topN = Math.max(1, Math.floor(hallOfFame.length / 3));
+  const parent = hallOfFame[Math.floor(Math.random() * topN)];
+  const id = nextId++;
+  const generation = parent.generation + 1;
+  if (generation > maxGen) maxGen = generation;
+  return {
+    id, parent: null,
+    lineage: parent.lineage,
+    generation,
+    x, y, px: x, py: y,
+    vx: 0, vy: 0,
+    E: params.E_init, O: params.O_init,
+    M: new Float32Array(MEM_DIM),
+    G: mutateGenome(parent.G, params.mutation),
+    T: mutateTraits(parent.T, params.traitMutation),
+    age: 0,
+    hue: (parent.hue + (Math.random() - 0.5) * 24 + 360) % 360,
+    action: -1,
+    born: tick,
+    lifeIntegral: 0,
   };
 }
 
@@ -854,6 +925,8 @@ function initSim() {
   nextId = 1;
   totalOrgTime = 0;
   births = 0; deaths = 0; maxGen = 0;
+  hallOfFame = [];
+  bestEverIntegral = 0;
   world = makeWorld();
   orgs = [];
   for (let i = 0; i < params.initPop; i++) {
@@ -985,6 +1058,9 @@ function stepSim() {
       R[i] = clamp(R[i] + 0.04, 0, 1);
       deaths++;
       spawnDeathFx({ x: fx, y: fy, hue: o.hue });
+      // Archive the dying organism's genome+traits if its lifetime
+      // organisation-time qualifies. This is the continuity mechanism.
+      recordToHoF(o);
       if (o.id === selectedId) selectedId = null;
       continue;
     }
@@ -1054,10 +1130,28 @@ function stepSim() {
     o.x = ((o.x % W) + W) % W;
     o.y = clamp(o.y, 0, H - 0.001);
     o.age++;
-    if (o.O > 0) totalOrgTime += o.O;
+    // Per-organism contribution to ∫O dt; also accumulated globally.
+    if (o.O > 0) {
+      const dO = o.O;
+      o.lifeIntegral = (o.lifeIntegral || 0) + dO;
+      totalOrgTime += dO;
+    }
     next.push(o);
   }
   orgs = next;
+
+  // === Continuity reinforcement ===
+  // When population is critically low, drip in descendants of the best
+  // historical lineages from the Hall of Fame so evolution carries
+  // across local extinctions instead of restarting from random noise.
+  // Probability-based (≈ once per second at default speed) so the rate
+  // doesn't scale with simulation speed.
+  if (orgs.length > 0 && orgs.length < REINFORCE_BELOW &&
+      hallOfFame.length > 0 && Math.random() < 0.006 &&
+      orgs.length < params.maxPop) {
+    orgs.push(spawnFromHoF(Math.random() * W, Math.random() * H));
+    births++;
+  }
 
   for (let i = fxPulses.length - 1; i >= 0; i--) {
     fxPulses[i].age++;
@@ -1338,7 +1432,7 @@ function $(id) { return DOM[id] || document.getElementById(id); }
 
 function cacheDOM() {
   const ids = ['world','chart','tickReadout','fpsReadout',
-    'mPop','mGen','mO','mE','mAge','mR','mInt','mBD',
+    'mPop','mGen','mO','mE','mAge','mR','mInt','mBD','mHoF','mBest',
     'actionBar','actionLegend','inspState','inspBody','hoverInfo',
     'btnPlay','btnStep','btnReset','btnSeed','speed','speedVal',
     'params','errBanner',
@@ -1389,6 +1483,10 @@ function updateHUD(now) {
     ? (totalOrgTime / 1000).toFixed(1) + '<span class="unit">k</span>'
     : totalOrgTime.toFixed(0);
   DOM.mBD.textContent = `${births} / ${deaths}`;
+  DOM.mHoF.textContent = hallOfFame.length;
+  DOM.mBest.innerHTML = bestEverIntegral > 9999
+    ? (bestEverIntegral / 1000).toFixed(1) + '<span class="unit">k</span>'
+    : bestEverIntegral.toFixed(0);
   DOM.tickReadout.textContent = `t = ${tick}`;
 
   if (now - fpsLastUpdate > 500) {
@@ -1923,7 +2021,13 @@ function loop(now) {
       if (playing) {
         for (let i = 0; i < stepsPerFrame; i++) stepSim();
         if (orgs.length === 0) {
-          for (let i = 0; i < 15; i++) orgs.push(newOrganism(Math.random()*W, Math.random()*H, null));
+          // True extinction: repopulate from Hall of Fame so the new
+          // cohort inherits hard-won policy and physiology instead of
+          // starting from random noise. Falls back to random founders
+          // only if the HoF is somehow empty.
+          for (let i = 0; i < 15; i++) {
+            orgs.push(spawnFromHoF(Math.random() * W, Math.random() * H));
+          }
         }
       }
       render();
